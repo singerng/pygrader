@@ -1,5 +1,4 @@
 import argparse
-from queue import Queue
 from threading import Thread, Lock
 
 import docker
@@ -7,11 +6,12 @@ import tarfile
 import time
 import os
 import sys
+import json
 from io import BytesIO
 
 EXECUTION_PATH = "/tmp/grader"
 SUPPORTED_LANGUAGES = ['py']
-TIMEOUT_WAIT_STEPS = 50
+TIMEOUT_WAIT = .050
 
 
 def add_to_tar(tar, image_filename, real_filename):
@@ -27,7 +27,7 @@ def add_to_tar(tar, image_filename, real_filename):
 
 
 def grade(problem_name, language, infile, outfile, codefile,
-          timeout=2000):
+          timeout=2):
     # setup docker connection
     client = docker.from_env()
 
@@ -75,8 +75,8 @@ def grade(problem_name, language, infile, outfile, codefile,
     def wait_for_timeout():
         # wait for the timeout, pausing occasionally to check whether the program has in fact completed
         # in which case this thread can exit
-        for x in range(int(timeout/TIMEOUT_WAIT_STEPS)):
-            time.sleep(TIMEOUT_WAIT_STEPS/1000)
+        while time.time() - start_time < timeout:
+            time.sleep(TIMEOUT_WAIT)
             if status['threading'] == 'completed':
                 return
 
@@ -106,13 +106,15 @@ def grade(problem_name, language, infile, outfile, codefile,
     end_time = time.time()
 
     # if it wasn't interrupted, then the status will still be 'waiting'
+    # kill it; it'll still be running because of the original sleep invocation
     lock.acquire()
     if status['threading'] == 'waiting':
+        container.kill()
         status['threading'] = 'completed'
     lock.release()
 
     # check if the thread was killed, and if so, mark it as a TLE
-    if status['threading'] == 'killed':
+    if status['threading'] == 'killed' or end_time - start_time > timeout:
         status['correct'] = False
         status['message'] = "Time limit exceeded"
         status['time'] = -1
@@ -144,7 +146,7 @@ def grade(problem_name, language, infile, outfile, codefile,
         if not status['correct']:
             status['message'] = "Incorrect"
 
-    return status['correct'], status['message'], status['time']
+    return status
 
 
 if __name__ == '__main__':
@@ -157,10 +159,10 @@ if __name__ == '__main__':
     parser.add_argument('codefile', help="path to script")
 
     args = parser.parse_args()
-    correct, message, time = grade(**vars(args))
-    print(message)
-    print(time)
-    if correct:
+    status = grade(**vars(args))
+    print(json.dumps(status))
+    sys.stdout.flush()
+    if status['correct']:
         sys.exit(0)
     else:
         sys.exit(1)
